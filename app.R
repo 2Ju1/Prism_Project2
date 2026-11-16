@@ -27,7 +27,7 @@ pixel_count <- image_size^2
 # 최대 100개의 주성분을 계산해 슬라이더와 비교 그래프에서 사용한다.
 max_pcs <- 100L
 # 기본 검색에는 앞쪽 주성분 42개를 사용하며, 슬라이더로 값을 바꿀 수 있다.
-# 현재 팀 사진 12장의 K=1~100 비교에서 가장 많은 10장을 맞힌 잠정 기본값이다.
+# 발표와 앱의 기본 검색에 사용할 팀 설정값이다.
 DEFAULT_K <- 42L
 # 앱에서 인정하는 네 가지 정답 라벨과 득표 표의 표시 순서이다.
 categories <- c("Boots", "Sandals", "Shoes", "Slippers")
@@ -402,6 +402,10 @@ ui <- navbarPage(
           setNames(our_info$file, paste(our_info$member, our_info$category, sep = " - "))
         ),
         h3(textOutput("our_status"))
+      ),
+      column(
+        4,
+        sliderInput("K_our", "Number of PCs (K)", 1, max_pcs, DEFAULT_K)
       )
     ),
     # Shoe Search와 같은 네 패널로 선택 사진부터 Best match까지 비교한다.
@@ -409,8 +413,8 @@ ui <- navbarPage(
     plotOutput("our_match_plot", height = 300),
     h3("Top 5"),
     tableOutput("our_top5"),
-    h3("Category prediction accuracy by K"),
-    p("Uses the selected Our Shoes photo at K = 1–100. Correct = 100%; incorrect = 0%."),
+    h3("Team photo classification accuracy by K"),
+    p(sprintf("Each point shows the percentage of our 12 labelled shoe photos classified correctly at that K. The dashed line marks the default K = %d.", DEFAULT_K)),
     textOutput("our_k_accuracy_summary"),
     plotOutput("our_k_accuracy_plot", height = 360),
     # 전체 팀 사진 결과는 선택 사진의 상세 결과 아래, 탭 맨 밑에 표시한다.
@@ -506,11 +510,14 @@ ui <- navbarPage(
 # ggplot의 aes()는 축·색상 매핑, geom은 그림 요소, labs는 이름, theme은 모양을 정한다.
 server <- function(input, output, session) {
 
-  # 두 탭의 K 슬라이더를 동기화해 어느 쪽에서 바꿔도 모든 결과에 같은 K를 사용한다.
+  # 각 탭의 K 슬라이더를 동기화해 어느 탭에서 바꿔도 같은 K를 사용한다.
   observeEvent(input$K, {
-    req(input$K_explain)
+    req(input$K_explain, input$K_our)
     if (as.integer(input$K_explain) != as.integer(input$K)) {
       updateSliderInput(session, "K_explain", value = input$K)
+    }
+    if (as.integer(input$K_our) != as.integer(input$K)) {
+      updateSliderInput(session, "K_our", value = input$K)
     }
   })
 
@@ -518,6 +525,13 @@ server <- function(input, output, session) {
     req(input$K)
     if (as.integer(input$K) != as.integer(input$K_explain)) {
       updateSliderInput(session, "K", value = input$K_explain)
+    }
+  })
+
+  observeEvent(input$K_our, {
+    req(input$K)
+    if (as.integer(input$K) != as.integer(input$K_our)) {
+      updateSliderInput(session, "K", value = input$K_our)
     }
   })
 
@@ -713,8 +727,8 @@ server <- function(input, output, session) {
   # 서로 다른 K로 복원한 사진을 비교해 K의 영향을 시각화한다.
   output$rebuild_plot <- renderPlot({
     x <- selected_x()
-    # 작은 K부터 최대 K까지 넓게 비교하고, 검증한 K=42와 현재 선택값도 포함한다.
-    ks <- unique(sort(c(1L, 10L, 25L, 42L, 70L, 100L, as.integer(input$K))))
+    # 작은 K부터 최대 K까지 넓게 비교하고, 기본 K와 현재 선택값도 포함한다.
+    ks <- unique(sort(c(1L, 10L, 25L, DEFAULT_K, 70L, 100L, as.integer(input$K))))
     # 계산해 둔 최대 PC 개수를 넘는 비교값은 제외한다.
     ks <- ks[ks <= max_pcs]
     # 원본 이미지 한 칸과 K별 복원 이미지 칸 수를 합한다.
@@ -777,52 +791,70 @@ server <- function(input, output, session) {
   }, res = 110)
 
   # ---- Our Shoes 탭의 반응형 계산과 출력 ----------------------------------
-  # Our Shoes에서 선택한 팀 사진의 K별 정답 여부를 계산한다.
+  # 라벨이 있는 팀 사진 전체에 대해 K=1~100 각각의 정답 수와 정확도를 계산한다.
   our_k_accuracy <- reactive({
-    info <- our_selected()
-    validate(need(!is.na(info$category), "Choose a photo with a known category in Our Shoes."))
-    x <- read_shoe(info$path)
-    predicted <- character(max_pcs)
-    correct <- logical(max_pcs)
-    withProgress(message = "Evaluating Our Shoes photo for K = 1–100", value = 0, {
-      for (k in seq_len(max_pcs)) {
-        result <- find_matches(x, k, true_label = info$category)
-        predicted[k] <- result$prediction
-        correct[k] <- isTRUE(result$correct)
-        incProgress(1 / max_pcs)
+    labelled <- our_info[!is.na(our_info$category), , drop = FALSE]
+    validate(need(nrow(labelled) > 0, "No labelled team photos yet."))
+
+    correct <- matrix(FALSE, nrow = nrow(labelled), ncol = max_pcs)
+    catalogue_scores <- catalog$scores[, seq_len(max_pcs), drop = FALSE]
+
+    withProgress(message = "Evaluating all Our Shoes photos for K = 1–100", value = 0, {
+      for (i in seq_len(nrow(labelled))) {
+        x <- read_shoe(labelled$path[i])
+        query <- query_scores(x, max_pcs)
+        # 각 주성분의 제곱 차이를 누적해 모든 K의 거리를 한 번에 만든다.
+        differences <- sweep(catalogue_scores, 2, query, "-")
+        cumulative_squared_distance <- t(apply(differences^2, 1, cumsum))
+
+        for (k in seq_len(max_pcs)) {
+          # 제곱 거리의 순서는 거리의 순서와 같으므로 제곱근 계산은 생략한다.
+          top_rows <- order(cumulative_squared_distance[, k])[1:5]
+          top_categories <- catalog$metadata$category[top_rows]
+          votes <- table(factor(top_categories, levels = categories))
+          tied_categories <- names(votes)[votes == max(votes)]
+          prediction <- top_categories[which(top_categories %in% tied_categories)[1]]
+          correct[i, k] <- identical(prediction, labelled$category[i])
+        }
+        incProgress(1 / nrow(labelled))
       }
     })
-    data.frame(K = seq_len(max_pcs), Photo = info$file, Actual = info$category,
-               Predicted = predicted, Accuracy = as.numeric(correct))
+
+    correct_n <- colSums(correct)
+    data.frame(
+      K = seq_len(max_pcs),
+      Correct = as.integer(correct_n),
+      Total = nrow(labelled),
+      Accuracy = correct_n / nrow(labelled)
+    )
   })
 
   output$our_k_accuracy_summary <- renderText({
     d <- our_k_accuracy()
-    req(input$K)
-    current <- d[d$K == as.integer(input$K), ]
-    sprintf("Photo: %s | Actual: %s | K = %d: predicted %s — %s (%.0f%%). Correct at %d of %d K values.",
-            current$Photo, current$Actual, current$K, current$Predicted,
-            if (current$Accuracy == 1) "Correct" else "Incorrect", 100 * current$Accuracy,
-            sum(d$Accuracy == 1), nrow(d))
+    default <- d[d$K == DEFAULT_K, ]
+    best_accuracy <- max(d$Accuracy)
+    best_k <- d$K[d$Accuracy == best_accuracy]
+    sprintf(
+      "Across %d team photos: K = %d classified %d/%d correctly (%.1f%%). Highest accuracy: %.1f%% at K = %s.",
+      default$Total, DEFAULT_K, default$Correct, default$Total,
+      100 * default$Accuracy, 100 * best_accuracy, paste(best_k, collapse = ", ")
+    )
   })
 
   output$our_k_accuracy_plot <- renderPlot({
     d <- our_k_accuracy()
-    req(input$K)
-    current <- d[d$K == as.integer(input$K), ]
-    correct <- d[d$Accuracy == 1, ]
+    default <- d[d$K == DEFAULT_K, ]
     print(
       ggplot(d, aes(K, Accuracy)) +
-        geom_step(colour = "#3478A5", linewidth = 1) +
-        geom_point(data = correct, colour = "#238443", size = 2) +
-        geom_vline(xintercept = input$K, linetype = "dashed", colour = "#B64B24") +
-        geom_point(data = current, colour = "#B64B24", size = 3) +
+        geom_line(colour = "#3478A5", linewidth = 1) +
+        geom_point(colour = "#3478A5", size = 1.8) +
+        geom_vline(xintercept = DEFAULT_K, linetype = "dashed", colour = "#B64B24") +
+        geom_point(data = default, colour = "#B64B24", size = 3) +
         scale_x_continuous(limits = c(1, max_pcs), breaks = c(1, 20, 40, 60, 80, 100)) +
-        scale_y_continuous(limits = c(0, 1), breaks = c(0, 1),
-                           labels = c("0% (Incorrect)", "100% (Correct)")) +
-        labs(title = d$Photo[1], x = "Number of principal components (K)",
-             y = "Selected photo accuracy",
-             caption = "Green: correct prediction | Orange: selected K") +
+        scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+        labs(x = "Number of principal components (K)",
+             y = "Accuracy across all team photos",
+             caption = sprintf("Dashed line and orange point: default K = %d", DEFAULT_K)) +
         theme_minimal(base_size = 12)
     )
   }, res = 110)

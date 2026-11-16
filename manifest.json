@@ -1570,10 +1570,13 @@
   },
   "files": {
     "app.R": {
-      "checksum": "55801861e7db194bf5c2fc61e0dcf9d7"
+      "checksum": "9ac5e3614b5f630bffe8b65ffea031dc"
     },
     "data1.csv": {
       "checksum": "acb67b113caf884d7a3151e7f6d2d43c"
+    },
+    "DEPLOYMENT_LINK.txt": {
+      "checksum": "5a9200c7573f2aca7aeb45267e6b201b"
     },
     "our_shoes/Jiwon_Shoes_1.png": {
       "checksum": "6b22f6df8a4a7ddb8c91308ab203fa6a"
